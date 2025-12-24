@@ -16,6 +16,13 @@ const availableAnimations = {
 };
 
 let skinViewer: skinview3d.SkinViewer;
+let editorContext: CanvasRenderingContext2D | null = null;
+let editorCanvas: HTMLCanvasElement | null = null;
+let isDrawing = false;
+let isEditorDirty = false;
+let currentSkinUrl = "";
+
+const editorSize = 64;
 
 function obtainTextureUrl(id: string): string {
 	const urlInput = document.getElementById(id) as HTMLInputElement;
@@ -40,12 +47,54 @@ function obtainTextureUrl(id: string): string {
 	return URL.createObjectURL(file);
 }
 
+function updateEditorFromUrl(url: string): void {
+	if (!editorContext || !editorCanvas) {
+		return;
+	}
+
+	editorContext.clearRect(0, 0, editorCanvas.width, editorCanvas.height);
+	if (url === "") {
+		return;
+	}
+
+	const image = new Image();
+	image.crossOrigin = "anonymous";
+	image.onload = () => {
+		editorContext?.clearRect(0, 0, editorCanvas?.width ?? editorSize, editorCanvas?.height ?? editorSize);
+		editorContext?.drawImage(image, 0, 0, editorCanvas?.width ?? editorSize, editorCanvas?.height ?? editorSize);
+	};
+	image.onerror = () => {
+		editorContext?.clearRect(0, 0, editorCanvas?.width ?? editorSize, editorCanvas?.height ?? editorSize);
+	};
+	image.src = url;
+}
+
+function applyEditorToViewer(): void {
+	if (!editorCanvas) {
+		return;
+	}
+
+	const skinModel = document.getElementById("skin_model") as HTMLSelectElement;
+	const earsSource = document.getElementById("ears_source") as HTMLSelectElement;
+	const dataUrl = editorCanvas.toDataURL("image/png");
+	skinViewer
+		.loadSkin(dataUrl, {
+			model: skinModel?.value as ModelType,
+			ears: earsSource?.value === "current_skin",
+		})
+		.catch(e => {
+			console.error(e);
+		});
+}
+
 function reloadSkin(): void {
 	const input = document.getElementById("skin_url") as HTMLInputElement;
 	const url = obtainTextureUrl("skin_url");
+	currentSkinUrl = url;
 	if (url === "") {
 		skinViewer.loadSkin(null);
 		input?.setCustomValidity("");
+		updateEditorFromUrl("");
 	} else {
 		const skinModel = document.getElementById("skin_model") as HTMLSelectElement;
 		const earsSource = document.getElementById("ears_source") as HTMLSelectElement;
@@ -55,7 +104,10 @@ function reloadSkin(): void {
 				model: skinModel?.value as ModelType,
 				ears: earsSource?.value === "current_skin",
 			})
-			.then(() => input?.setCustomValidity(""))
+			.then(() => {
+				input?.setCustomValidity("");
+				updateEditorFromUrl(url);
+			})
 			.catch(e => {
 				input?.setCustomValidity("Image can't be loaded.");
 				console.error(e);
@@ -510,5 +562,131 @@ function initializeViewer(): void {
 	reloadNameTag();
 }
 
+function initializeEditor(): void {
+	editorCanvas = document.getElementById("skin_editor") as HTMLCanvasElement | null;
+	if (!editorCanvas) {
+		return;
+	}
+
+	editorCanvas.width = editorSize;
+	editorCanvas.height = editorSize;
+	editorContext = editorCanvas.getContext("2d", { willReadFrequently: true });
+	if (!editorContext) {
+		return;
+	}
+	editorContext.imageSmoothingEnabled = false;
+
+	const colorInput = document.getElementById("editor_color") as HTMLInputElement;
+	const brushInput = document.getElementById("editor_brush") as HTMLInputElement;
+	const toolInput = document.getElementById("editor_tool") as HTMLSelectElement;
+	const clearButton = document.getElementById("editor_clear");
+	const downloadButton = document.getElementById("editor_download");
+
+	const drawPixel = (x: number, y: number) => {
+		if (!editorContext || !editorCanvas) {
+			return;
+		}
+		const brushSize = Number(brushInput?.value ?? 1);
+		const halfBrush = Math.floor(brushSize / 2);
+		const startX = x - halfBrush;
+		const startY = y - halfBrush;
+		const tool = toolInput?.value ?? "draw";
+		const color = colorInput?.value ?? "#000000";
+
+		if (tool === "erase") {
+			for (let px = 0; px < brushSize; px += 1) {
+				for (let py = 0; py < brushSize; py += 1) {
+					const drawX = startX + px;
+					const drawY = startY + py;
+					if (drawX >= 0 && drawX < editorCanvas.width && drawY >= 0 && drawY < editorCanvas.height) {
+						editorContext.clearRect(drawX, drawY, 1, 1);
+					}
+				}
+			}
+		} else {
+			editorContext.fillStyle = color;
+			for (let px = 0; px < brushSize; px += 1) {
+				for (let py = 0; py < brushSize; py += 1) {
+					const drawX = startX + px;
+					const drawY = startY + py;
+					if (drawX >= 0 && drawX < editorCanvas.width && drawY >= 0 && drawY < editorCanvas.height) {
+						editorContext.fillRect(drawX, drawY, 1, 1);
+					}
+				}
+			}
+		}
+		isEditorDirty = true;
+	};
+
+	const getEditorCoords = (event: PointerEvent) => {
+		if (!editorCanvas) {
+			return { x: 0, y: 0 };
+		}
+		const rect = editorCanvas.getBoundingClientRect();
+		const scaleX = editorCanvas.width / rect.width;
+		const scaleY = editorCanvas.height / rect.height;
+		const x = Math.floor((event.clientX - rect.left) * scaleX);
+		const y = Math.floor((event.clientY - rect.top) * scaleY);
+		return { x, y };
+	};
+
+	editorCanvas.addEventListener("pointerdown", event => {
+		isDrawing = true;
+		isEditorDirty = false;
+		editorCanvas?.setPointerCapture(event.pointerId);
+		const { x, y } = getEditorCoords(event);
+		drawPixel(x, y);
+	});
+
+	editorCanvas.addEventListener("pointermove", event => {
+		if (!isDrawing) {
+			return;
+		}
+		const { x, y } = getEditorCoords(event);
+		drawPixel(x, y);
+	});
+
+	editorCanvas.addEventListener("pointerup", event => {
+		if (!isDrawing) {
+			return;
+		}
+		isDrawing = false;
+		editorCanvas?.releasePointerCapture(event.pointerId);
+		if (isEditorDirty) {
+			applyEditorToViewer();
+			isEditorDirty = false;
+		}
+	});
+
+	editorCanvas.addEventListener("pointerleave", () => {
+		if (!isDrawing) {
+			return;
+		}
+		isDrawing = false;
+		if (isEditorDirty) {
+			applyEditorToViewer();
+			isEditorDirty = false;
+		}
+	});
+
+	clearButton?.addEventListener("click", () => {
+		editorContext?.clearRect(0, 0, editorCanvas?.width ?? editorSize, editorCanvas?.height ?? editorSize);
+		applyEditorToViewer();
+	});
+
+	downloadButton?.addEventListener("click", () => {
+		if (!editorCanvas) {
+			return;
+		}
+		const link = document.createElement("a");
+		link.href = editorCanvas.toDataURL("image/png");
+		link.download = "skin.png";
+		link.click();
+	});
+
+	updateEditorFromUrl(currentSkinUrl);
+}
+
 initializeViewer();
 initializeControls();
+initializeEditor();
